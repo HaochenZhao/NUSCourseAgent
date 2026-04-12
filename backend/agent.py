@@ -1,210 +1,374 @@
-import os
+"""
+NUS Course Agent — Tool-calling conversational agent.
+
+Single agentic loop: LLM decides which tools to call and when.
+Streams SSE events to the frontend.
+Compatible with any OpenAI-compatible API (OpenRouter, qingyuntop, etc.)
+"""
+
 import json
-import time
 import logging
-from typing import List, Dict, Any, Generator, Optional
-import google.generativeai as genai
-from openai import OpenAI
+import os
+from typing import Any, Dict, Generator, List, Optional
+
 from dotenv import load_dotenv
-from tools import search_modules, NUSModsClient, check_prerequisites
+from openai import OpenAI
+
+from tools import (
+    NUSModsClient,
+    tool_build_timetable,
+    tool_get_module_details,
+    tool_search_modules,
+)
 
 load_dotenv()
-
-# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# System Prompt
-SYSTEM_PROMPT = """
-You are the NUS Course Selection Agent. Your goal is to help students find the best courses based on their academic goals, preferences, and constraints.
+LLM_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.qingyuntop.top/v1")
+LLM_API_KEY = os.getenv("OPENAI_API_KEY", "")
+MAX_ITERATIONS = 15
 
-Capabilities:
-1. Search for modules based on interests or requirements.
-2. Check prerequisites for modules.
-3. Analyze workload and teaching styles.
-4. Recommend courses that balance GPA goals and intellectual interest.
+# ---------------------------------------------------------------------------
+# Tool definitions (OpenAI function-calling schema)
+# ---------------------------------------------------------------------------
 
-Student Profile:
-- Taken Modules: {taken_modules}
-- Priorities: {priorities} (e.g., Knowledge-oriented, GPA-oriented, Logistical)
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_modules",
+            "description": (
+                "Search or list NUS modules. Use 'prefix' to filter by code prefix "
+                "(e.g. 'CS5' for all CS5xxx). Use 'query' for keyword search in code+title. "
+                "Both can be combined. Pass query='' with a prefix to list all modules "
+                "under that prefix."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword(s) to search, e.g. 'machine learning'. Empty string to skip keyword filter.",
+                    },
+                    "prefix": {
+                        "type": "string",
+                        "description": "Module code prefix filter, e.g. 'CS5', 'CS'. Omit to search all codes.",
+                    },
+                    "semester": {
+                        "type": "integer",
+                        "description": "Filter to modules offered in this semester (1 or 2). Omit for both.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_module_details",
+            "description": (
+                "Get full details for specific modules: description, workload, "
+                "lecture schedule (tutorials are excluded), exam dates, and "
+                "prerequisite information (undergrad only). "
+                "Always call this before recommending modules."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_codes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Module codes to look up, e.g. ['CS5228', 'CS5340'].",
+                    },
+                },
+                "required": ["module_codes"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "build_timetable",
+            "description": (
+                "Validate that a set of modules have no lecture time conflicts and "
+                "produce the weekly timetable for the UI to render. "
+                "ALWAYS call this as the final step when recommending a course plan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "module_codes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "The final list of recommended module codes.",
+                    },
+                },
+                "required": ["module_codes"],
+            },
+        },
+    },
+]
 
-When recommending:
-- Be specific about why a module fits their profile.
-- Warn them if they don't meet prerequisites.
-- Mention workload intensity.
-- Use markdown for formatting.
+TOOL_STATUS = {
+    "search_modules": "Searching modules...",
+    "get_module_details": "Fetching module details...",
+    "build_timetable": "Building timetable...",
+}
+
+# ---------------------------------------------------------------------------
+# System prompt builder
+# ---------------------------------------------------------------------------
+
+
+def build_system_prompt(profile: Dict[str, Any]) -> str:
+    is_postgrad = profile.get("level", "").lower() == "postgraduate"
+    year = profile.get("year", 1)
+    semester = profile.get("semester", 1)
+
+    prompt = f"""\
+You are the NUS Course Selection Assistant. You help students at the National \
+University of Singapore find and plan courses for their upcoming semester.
+
+STUDENT CONTEXT
+---------------
+Programme        : {profile.get("programme", "Not specified")}
+Level            : {profile.get("level", "Not specified")}
+Year of study    : {year}
+Eligible courses : {profile.get("pool_description", "Not specified")}
+Semester         : {semester}
+
+COURSE LEVEL GUIDELINES
+-----------------------
 """
 
-class LLMProvider:
-    def stream_chat(self, system_msg: str, user_msg: str) -> Generator[str, None, None]:
-        raise NotImplementedError
-    
-    def test(self) -> Dict[str, Any]:
-        raise NotImplementedError
+    if is_postgrad:
+        prompt += """\
+This student is a postgraduate student.
+Recommend 5xxx and 6xxx level courses.
+"""
+    else:
+        prompt += f"""\
+This student is a Year {year} undergraduate.
+Prioritize {year}xxx level courses, but adjacent levels are acceptable.
+For example, a Year 3 student should primarily see 3xxx courses,
+but 4xxx is fine if it fits their interest.
+"""
 
-class GeminiProvider(LLMProvider):
-    def __init__(self):
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-1.5-pro')
-        else:
-            self.model = None
+    prompt += """
+HOW TO WORK
+-----------
+1. Use search_modules to find candidates within the student's eligible pool.
+2. Use get_module_details to get full information on promising candidates.
+   - Read the lecture times carefully. DO NOT recommend modules whose
+     lectures overlap. Compare every pair of lecture slots before deciding.
+"""
 
-    def stream_chat(self, system_msg: str, user_msg: str) -> Generator[str, None, None]:
-        if not self.model:
-            raise ValueError("Gemini API Key not configured")
-        
-        response = self.model.generate_content([
-            {"text": system_msg},
-            {"text": user_msg}
-        ], stream=True)
-        
-        for chunk in response:
-            if chunk.text:
-                yield chunk.text
+    if not is_postgrad:
+        prompt += """\
+   - Read the prerequisite_text for each module. If a module has
+     prerequisites, TELL the student what they are and ASK whether
+     they have completed them. Do not assume. Do not skip this.
+     If the student says they cannot meet a prerequisite, find a
+     replacement and re-verify the timetable.
+"""
 
-    def test(self) -> Dict[str, Any]:
-        if not self.model:
-            return {"success": False, "error": "API Key missing"}
+    prompt += """\
+3. Once you have a conflict-free set, call build_timetable to confirm
+   and generate the visual timetable for the student.
+
+RULES
+-----
+- NEVER invent module information. Every fact must come from tool results.
+- NEVER recommend modules with overlapping lecture times.
+- ALWAYS call build_timetable as the final step when giving a course plan.
+"""
+
+    if not is_postgrad:
+        prompt += """\
+- ALWAYS show prerequisite requirements to the student and ask for
+  confirmation before finalizing.
+"""
+
+    prompt += """\
+- Be concise. Use markdown tables when comparing modules.
+- Include NUSMods links so the student can verify details.
+- When the student asks for adjustments, use conversation history.
+  Only call the tools you need, don't redo everything from scratch.
+"""
+
+    return prompt
+
+
+# ---------------------------------------------------------------------------
+# Tool executor
+# ---------------------------------------------------------------------------
+
+
+class ToolExecutor:
+    def __init__(self, profile: Dict[str, Any]) -> None:
+        self.profile = profile
+        self.semester = int(profile.get("semester", 1))
+        self.is_postgrad = profile.get("level", "").lower() == "postgraduate"
+        self.timetable_payload: Optional[Dict[str, Any]] = None
+
+    def execute(self, name: str, args: Dict[str, Any]) -> Any:
         try:
-            res = self.model.generate_content("Hi")
-            return {"success": True, "model": "gemini-1.5-pro"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+            if name == "search_modules":
+                return tool_search_modules(
+                    query=args.get("query", ""),
+                    prefix=args.get("prefix", ""),
+                    semester=args.get("semester") or self.semester,
+                )
+            elif name == "get_module_details":
+                return tool_get_module_details(
+                    module_codes=args.get("module_codes", []),
+                    semester=self.semester,
+                    is_postgrad=self.is_postgrad,
+                )
+            elif name == "build_timetable":
+                result = tool_build_timetable(
+                    module_codes=args.get("module_codes", []),
+                    semester=self.semester,
+                )
+                if result.get("feasible"):
+                    self.timetable_payload = result
+                return result
+            else:
+                return {"error": f"Unknown tool: {name}"}
+        except Exception as exc:
+            logger.warning("Tool %s failed: %s", name, exc)
+            return {"error": str(exc)}
 
-class OpenRouterProvider(LLMProvider):
-    def __init__(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.model_id = os.getenv("OPENROUTER_MODEL", "google/gemma-2-9b-it:free")
-        if self.api_key:
-            self.client = OpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=self.api_key,
-                default_headers={
-                    "HTTP-Referer": "https://nus-course-agent.local",
-                    "X-Title": "NUS Course Agent",
-                }
-            )
-        else:
-            self.client = None
 
-    def stream_chat(self, system_msg: str, user_msg: str) -> Generator[str, None, None]:
-        if not self.client:
-            raise ValueError("OpenRouter API Key not configured")
-        
-        # Merge system message into user message for better compatibility with free models
-        combined_user_msg = f"{system_msg}\n\nUser Request: {user_msg}"
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
 
-        response = self.client.chat.completions.create(
-            model=self.model_id,
-            messages=[
-                {"role": "user", "content": combined_user_msg}
-            ],
-            stream=True,
-            extra_body={"reasoning": {"enabled": True}}
-        )
-        
-        for chunk in response:
-            if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
-                delta = chunk.choices[0].delta
-                # OpenRouter reasoning chunks might come in delta.reasoning
-                reasoning = getattr(delta, 'reasoning', None)
-                content = getattr(delta, 'content', None)
-                
-                if reasoning:
-                    yield reasoning
-                if content:
-                    yield content
-            elif hasattr(chunk, 'error'):
-                raise ValueError(f"OpenRouter Error: {chunk.error}")
-
-    def test(self) -> Dict[str, Any]:
-        if not self.client:
-            return {"success": False, "error": "API Key missing"}
-        try:
-            res = self.client.chat.completions.create(
-                model=self.model_id,
-                messages=[{"role": "user", "content": "Hi"}],
-                max_tokens=5
-            )
-            return {"success": True, "model": self.model_id}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-class DemoProvider(LLMProvider):
-    def stream_chat(self, system_msg: str, user_msg: str) -> Generator[str, None, None]:
-        mock_response = f"**[Demo Mode]** Based on your request, I've analyzed the available modules. \n\n"
-        mock_response += "I recommend checking out modules that align with your interest in " + user_msg[:40] + "...\n\n"
-        mock_response += "1. **CS2109S**: Intro to AI and Machine Learning.\n"
-        mock_response += "2. **CS2040S**: Data Structures and Algorithms.\n\n"
-        mock_response += "*(Note: This is a fallback mock response because the selected LLM provider encountered an error.)*"
-        
-        for word in mock_response.split(" "):
-            yield word + " "
-            time.sleep(0.05)
-
-    def test(self) -> Dict[str, Any]:
-        return {"success": True, "model": "demo-mode"}
 
 class CourseAgent:
-    def __init__(self, taken_modules: List[str] = None, priorities: str = "balanced"):
-        self.taken_modules = set(taken_modules or [])
-        self.priorities = priorities
-        
-        self.provider_name = os.getenv("LLM_PROVIDER", "gemini").lower()
-        if self.provider_name == "openrouter":
-            self.provider = OpenRouterProvider()
-        else:
-            self.provider = GeminiProvider()
+    def __init__(self) -> None:
+        self.client: Optional[OpenAI] = None
+        if LLM_API_KEY:
+            self.client = OpenAI(
+                base_url=LLM_BASE_URL,
+                api_key=LLM_API_KEY,
+            )
+        self.model = LLM_MODEL
 
     def test_connection(self) -> Dict[str, Any]:
-        return self.provider.test()
-
-    def chat_stream(self, user_message: str) -> Generator[str, None, None]:
-        # 1. Tool-grounded enrichment with better logging
-        logger.info(f"Querying modules for: {user_message}")
-        start_time = time.time()
-        
-        found_mods = search_modules(user_message, limit=5)
-        logger.info(f"Search took {time.time() - start_time:.2f}s")
-
-        enriched_results = []
-        for mod in found_mods:
-            details = NUSModsClient.get_module_details(mod['moduleCode'])
-            if details:
-                can_take = check_prerequisites(details.get('prereqTree'), self.taken_modules)
-                # Truncate description to save tokens for free-tier models
-                desc = details.get('description', '')
-                if len(desc) > 300:
-                    desc = desc[:300] + "..."
-
-                enriched_results.append({
-                    "code": mod['moduleCode'],
-                    "title": mod['title'],
-                    "description": desc,
-                    "workload": details.get('workload', 'N/A'),
-                    "can_take": can_take,
-                    "prereq_text": details.get('prerequisite', 'None')
-                })
-        
-        context = json.dumps(enriched_results, indent=2)
-        system_msg = SYSTEM_PROMPT.format(taken_modules=list(self.taken_modules), priorities=self.priorities)
-        prompt = f"User Request: {user_message}\n\nGround Truth Search Results:\n{context}\n\nPlease provide a recommendation."
-
-        # 2. Execute with fallback
+        if not self.client:
+            return {"success": False, "error": "API key missing"}
         try:
-            logger.info(f"Streaming from provider: {self.provider_name}")
-            for chunk in self.provider.stream_chat(system_msg, prompt):
-                yield chunk
-        except Exception as e:
-            logger.error(f"Provider Error ({type(e).__name__}): {str(e)}")
-            # If we already yielded chunks, we can't easily start the DemoProvider stream from scratch within SSE
-            # but we can yield the error message or the fallback
-            yield f"\n\n**[Connection Error]** {str(e)}\n\n"
-            for chunk in DemoProvider().stream_chat(system_msg, prompt):
-                yield chunk
+            self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply OK"}],
+                max_tokens=20,
+            )
+            return {"success": True, "model": self.model}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
 
-if __name__ == "__main__":
-    agent = CourseAgent(taken_modules=["CS1010"], priorities="balanced")
-    print(agent.test_connection())
+    def stream_chat(
+        self,
+        message: str,
+        profile: Dict[str, Any],
+        history: List[Dict[str, str]],
+    ) -> Generator[Dict[str, Any], None, None]:
+        if not self.client:
+            yield {"event": "error", "data": {"message": "OpenRouter API key not configured."}}
+            return
+
+        system_prompt = build_system_prompt(profile)
+        executor = ToolExecutor(profile)
+
+        # Build messages
+        messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        for item in history:
+            role = item.get("role", "")
+            content = item.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        messages.append({"role": "user", "content": message})
+
+        # Agentic loop
+        last_choice = None
+
+        for iteration in range(MAX_ITERATIONS):
+            is_last = iteration == MAX_ITERATIONS - 1
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=TOOLS if not is_last else None,
+                    tool_choice="auto" if not is_last else None,
+                    max_tokens=4096,
+                    temperature=0.3,
+                )
+            except Exception as exc:
+                yield {"event": "error", "data": {"message": f"LLM call failed: {exc}"}}
+                return
+
+            choice = response.choices[0]
+            last_choice = choice
+
+            if choice.finish_reason != "tool_calls":
+                break
+
+            tool_calls = choice.message.tool_calls or []
+            if not tool_calls:
+                break
+
+            # Append assistant message with tool calls
+            messages.append({
+                "role": "assistant",
+                "content": choice.message.content or "",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in tool_calls
+                ],
+            })
+
+            # Execute tools
+            for tc in tool_calls:
+                fn_name = tc.function.name
+                try:
+                    fn_args = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    fn_args = {}
+
+                yield {
+                    "event": "tool_call",
+                    "data": {
+                        "name": fn_name,
+                        "display": TOOL_STATUS.get(fn_name, f"Running {fn_name}..."),
+                    },
+                }
+
+                result = executor.execute(fn_name, fn_args)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                })
+
+        # Emit final text
+        final_text = (last_choice.message.content or "") if last_choice else ""
+        if final_text:
+            yield {"event": "text_delta", "data": {"text": final_text}}
+
+        # Emit timetable if build_timetable succeeded
+        if executor.timetable_payload is not None:
+            yield {"event": "timetable", "data": executor.timetable_payload}
+
+        yield {"event": "done", "data": {}}

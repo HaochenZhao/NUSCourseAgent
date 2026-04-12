@@ -1,15 +1,19 @@
-from fastapi import FastAPI, HTTPException, Body
-from fastapi.responses import StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any, Optional
-from pydantic import BaseModel
-from tools import search_modules, check_prerequisites, NUSModsClient, check_timetable_conflicts
-from agent import CourseAgent
+"""
+FastAPI server — thin routing layer.
+"""
+
 import json
 
-app = FastAPI(title="NUS Course Selection Agent API")
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Dict, List, Optional
 
-# Enable CORS for frontend
+from agent import CourseAgent
+
+app = FastAPI(title="NUS Course Agent API")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,65 +21,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+agent = CourseAgent()
+
+
 class ChatRequest(BaseModel):
     message: str
-    taken_modules: List[str] = []
-    priorities: str = "balanced"
+    profile: Dict = {}
+    history: List[Dict] = []
 
-class ValidateRequest(BaseModel):
-    module_code: str
-    taken_modules: List[str]
 
 @app.get("/")
-def read_root():
-    return {"message": "Welcome to the NUS Course Selection Agent API"}
+def root():
+    return {"status": "ok", "service": "NUS Course Agent"}
 
-@app.post("/chat")
-async def chat_endpoint(req: ChatRequest):
-    agent = CourseAgent(taken_modules=req.taken_modules, priorities=req.priorities)
-    chunks = []
-    for chunk in agent.chat_stream(req.message):
-        chunks.append(chunk)
-    return {"response": "".join(chunks)}
 
-@app.post("/chat/stream")
-async def chat_stream_endpoint(req: ChatRequest):
-    agent = CourseAgent(taken_modules=req.taken_modules, priorities=req.priorities)
-    
-    def event_generator():
-        for chunk in agent.chat_stream(req.message):
-            # SSE format
-            yield f"data: {json.dumps({'text': chunk})}\n\n"
-    
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-@app.post("/tools/test_llm")
-async def test_llm_endpoint(req: ChatRequest):
-    """Diagnose the LLM connection."""
-    agent = CourseAgent(taken_modules=req.taken_modules, priorities=req.priorities)
+@app.get("/health")
+def health():
     return agent.test_connection()
 
-@app.get("/tools/search")
-async def search_endpoint(q: str, limit: int = 10):
-    return search_modules(q, limit)
 
-@app.post("/tools/validate")
-async def validate_endpoint(req: ValidateRequest):
-    details = NUSModsClient.get_module_details(req.module_code)
-    if not details:
-        raise HTTPException(status_code=404, detail="Module not found")
-    
-    can_take = check_prerequisites(details.get('prereqTree'), set(req.taken_modules))
-    return {
-        "module_code": req.module_code,
-        "can_take": can_take,
-        "prereq_tree": details.get('prereqTree'),
-        "prereq_text": details.get('prerequisite')
-    }
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest):
+    def event_generator():
+        for event in agent.stream_chat(req.message, req.profile, req.history):
+            event_type = event.get("event", "unknown")
+            data = event.get("data", {})
+            yield f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
-@app.post("/tools/conflicts")
-async def conflicts_endpoint(modules: List[str], semester: int = 1):
-    return check_timetable_conflicts(modules, semester)
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 if __name__ == "__main__":
     import uvicorn
