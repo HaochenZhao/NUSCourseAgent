@@ -1,7 +1,5 @@
 # NUS Course Agent
 
-[**English**](./README.md) | [**简体中文**](./README_zh.md)
-
 An AI-powered NUS module planning assistant with:
 
 - a FastAPI backend that streams SSE events
@@ -221,4 +219,3 @@ Frontend scripts from `frontend/package.json`:
 
 - [TEST_REPORT.md](./TEST_REPORT.md): current tested scenarios
 - [DESIGN.md](./DESIGN.md): design notes
-
