@@ -111,3 +111,4 @@ Thumbs.db
 backend/.env
 backend/__pycache__/
 test.py
+backend/*.db

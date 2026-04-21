@@ -12,12 +12,13 @@ This README describes how the current codebase works and how to run it locally.
 ## Current Architecture
 
 - `backend/`
-  - `main.py`: FastAPI app, `/`, `/health`, `/chat/stream`
-  - `agent.py`: LLM tool-calling loop
+  - `main.py`: FastAPI app, `/`, `/health`, `/chat/stream`, `/auth/*`, `/users/*`
+  - `agent.py`: LLM tool-calling loop (supports dynamic config)
   - `tools.py`: NUSMods search, module detail lookup, timetable builder
+  - `database/models/auth`: Auth logic and SQLite persistence
 - `frontend/`
-  - `src/app/page.tsx`: main chat page
-  - `src/app/globals.css`: UI styling
+  - `src/app/page.tsx`: main chat page with integrated auth
+  - `src/components/`: Login and Settings modals
 
 ## Prerequisites
 
@@ -40,6 +41,10 @@ Optional:
   - default: `gpt-5-mini`
 - `OPENAI_BASE_URL`
   - default: `https://api.qingyuntop.top/v1`
+- `JWT_SECRET_KEY`
+  - Random string for signing login tokens.
+- `DB_ENCRYPTION_KEY`
+  - Fernet key for encrypting API keys in the database.
 
 Recommended setup:
 
@@ -55,22 +60,38 @@ OPENAI_MODEL=gpt-5-mini
 OPENAI_BASE_URL=https://api.qingyuntop.top/v1
 ```
 
-Notes:
+### User Authentication & Data Security
 
-- This project does not use the old `LLM_PROVIDER`, `GOOGLE_API_KEY`, or `OPENROUTER_API_KEY` settings anymore.
-- There is no demo/simulation fallback in the current backend. If `OPENAI_API_KEY` is missing, `/health` will fail and chat requests will return an error.
+This project now features a **local authentication system**:
+- **Login**: Passwordless login using NUS Email OTP (verification code is printed to the terminal in local mode).
+- **Domain Restriction**: Only emails ending in `.nus.edu` or `nus.edu.sg` are allowed.
+- **Data Persistence**: User settings (including custom API keys) are stored in `backend/app.db`.
+- **Security**: 
+  - `app.db` is excluded from Git.
+  - Sensitive database fields (API Keys) are **encrypted** using the `DB_ENCRYPTION_KEY` from your `.env`.
+  - API keys are **masked** in the UI.
 
-## Backend Startup
+## 🚀 Quick Start with Docker (Recommended)
 
-Run the backend from the `backend/` directory.
+The easiest way to deploy this project locally or on a cloud server (Aliyun, etc.) is using Docker.
 
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
+1. **Clone the repo**
+2. **Setup environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your API keys
+   ```
+3. **Run with one command**:
+   ```bash
+   docker-compose up --build -d
+   ```
+4. **Access the app**:
+   - Frontend: `http://localhost`
+   - Backend API: `http://localhost/api`
+
+---
+
+## Backend Startup (Manual)
 
 Why port `8000`:
 
@@ -207,6 +228,9 @@ Backend packages from `backend/requirements.txt`:
 - `openai`
 - `python-dotenv`
 - `pydantic`
+- `sqlalchemy`
+- `python-jose[cryptography]`
+- `passlib`
 
 Frontend scripts from `frontend/package.json`:
 
@@ -215,7 +239,30 @@ Frontend scripts from `frontend/package.json`:
 - `npm run start`
 - `npm run lint`
 
-## Reference Files
+## Deployment (Cloud)
 
-- [TEST_REPORT.md](./TEST_REPORT.md): current tested scenarios
-- [DESIGN.md](./DESIGN.md): design notes
+To deploy this project to a remote server (e.g., Aliyun):
+
+### 1. Backend Setup
+- Use a production server like Gunicorn: `pip install gunicorn`
+- Set `ALLOWED_ORIGINS` in `.env` to your frontend domain.
+- To enable real email OTP:
+  - Sign up for [Resend](https://resend.com).
+  - Add `RESEND_API_KEY` to your `.env`.
+- Run: `gunicorn -w 4 -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000`
+
+### 2. Frontend Setup
+- Create a `.env.production` file in the `frontend` directory:
+  ```env
+  NEXT_PUBLIC_API_URL=https://api.yourdomain.com
+  ```
+- Build the app: `npm run build`
+- Start the server: `npm run start` (or serve via Nginx).
+
+### 3. Nginx Configuration
+It is highly recommended to use Nginx as a reverse proxy for SSL and to handle both frontend and backend on ports 80/443.
+
+---
+
+## Reference Files
+...

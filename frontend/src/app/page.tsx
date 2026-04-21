@@ -1,10 +1,13 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback, FormEvent } from "react";
-import { Send, BookOpen, Sparkles, LoaderCircle } from "lucide-react";
+import { Send, BookOpen, Sparkles, LoaderCircle, Settings, LogOut, User as UserIcon, LogIn } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import LoginModal from "@/components/LoginModal";
+import SettingsModal from "@/components/SettingsModal";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,7 +44,7 @@ interface ChatMessage {
 
 type StreamEventType = "tool_call" | "text_delta" | "timetable" | "error" | "done" | "unknown";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const MODULE_COLORS = [
   "#818cf8", "#f472b6", "#34d399", "#fbbf24",
@@ -181,9 +184,38 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [currentToolCall, setCurrentToolCall] = useState<string | null>(null);
   const [toolCallHistory, setToolCallHistory] = useState<string[]>([]);
+  
+  // Auth state
+  const [token, setToken] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const savedToken = localStorage.getItem("nus_agent_token");
+    const savedEmail = localStorage.getItem("nus_agent_email");
+    if (savedToken && savedEmail) {
+      setToken(savedToken);
+      setUserEmail(savedEmail);
+    }
+  }, []);
+
+  const handleLoginSuccess = (newToken: string, email: string) => {
+    setToken(newToken);
+    setUserEmail(email);
+    localStorage.setItem("nus_agent_token", newToken);
+    localStorage.setItem("nus_agent_email", email);
+  };
+
+  const handleLogout = () => {
+    setToken(null);
+    setUserEmail(null);
+    localStorage.removeItem("nus_agent_token");
+    localStorage.removeItem("nus_agent_email");
+  };
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -212,7 +244,10 @@ export default function Home() {
       try {
         const resp = await fetch(`${API_BASE}/chat/stream`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { 
+            "Content-Type": "application/json",
+            ...(token ? { "Authorization": `Bearer ${token}` } : {})
+          },
           body: JSON.stringify({ message: text, profile, history }),
         });
 
@@ -346,6 +381,47 @@ export default function Home() {
             <h1 className="text-lg font-bold gradient-text">NUS Course Agent</h1>
           </div>
           <p className="text-[11px] text-slate-500 mt-1 ml-9.5">AI-powered course selection</p>
+        </div>
+
+        {/* User Section */}
+        <div className="px-5 py-4 border-b border-white/5">
+          {token ? (
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 overflow-hidden">
+                <div className="w-8 h-8 rounded-full bg-indigo-500/20 flex items-center justify-center flex-shrink-0">
+                  <UserIcon size={14} className="text-indigo-400" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-wider font-bold truncate">Authenticated</p>
+                  <p className="text-xs text-slate-300 truncate font-medium">{userEmail}</p>
+                </div>
+              </div>
+              <div className="flex gap-1 ml-2">
+                <button 
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="p-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-all"
+                  title="Settings"
+                >
+                  <Settings size={16} />
+                </button>
+                <button 
+                  onClick={handleLogout}
+                  className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-400/5 rounded-lg transition-all"
+                  title="Logout"
+                >
+                  <LogOut size={16} />
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsLoginOpen(true)}
+              className="w-full py-2.5 bg-indigo-600/10 hover:bg-indigo-600/20 border border-indigo-500/20 rounded-xl text-indigo-400 text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2 transition-all"
+            >
+              <LogIn size={14} />
+              Login with NUS Email
+            </button>
+          )}
         </div>
 
         <div className="p-5 flex-1 overflow-y-auto space-y-5">
@@ -572,6 +648,21 @@ export default function Home() {
           </form>
         </div>
       </main>
+
+      {/* Modals */}
+      <LoginModal 
+        isOpen={isLoginOpen} 
+        onClose={() => setIsLoginOpen(false)} 
+        onLoginSuccess={handleLoginSuccess} 
+      />
+      
+      {token && (
+        <SettingsModal 
+          isOpen={isSettingsOpen} 
+          onClose={() => setIsSettingsOpen(false)} 
+          token={token} 
+        />
+      )}
     </div>
   );
 }

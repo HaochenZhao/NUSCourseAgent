@@ -4,3 +4,8 @@ requests
 openai
 python-dotenv
 pydantic
+sqlalchemy
+python-jose[cryptography]
+passlib
+gunicorn
+resend

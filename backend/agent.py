@@ -276,10 +276,27 @@ class CourseAgent:
         message: str,
         profile: Dict[str, Any],
         history: List[Dict[str, str]],
+        llm_config: Optional[Dict[str, str]] = None,
     ) -> Generator[Dict[str, Any], None, None]:
-        if not self.client:
-            yield {"event": "error", "data": {"message": "OpenRouter API key not configured."}}
+        # Determine which config to use
+        api_key = LLM_API_KEY
+        base_url = LLM_BASE_URL
+        model = self.model
+
+        if llm_config:
+            if llm_config.get("api_key"):
+                api_key = llm_config["api_key"]
+            if llm_config.get("base_url"):
+                base_url = llm_config["base_url"]
+            if llm_config.get("model"):
+                model = llm_config["model"]
+
+        if not api_key:
+            yield {"event": "error", "data": {"message": "LLM API key not configured."}}
             return
+
+        # Initialize client for this request (to support dynamic config)
+        client = OpenAI(base_url=base_url, api_key=api_key)
 
         system_prompt = build_system_prompt(profile)
         executor = ToolExecutor(profile)
@@ -299,8 +316,8 @@ class CourseAgent:
         for iteration in range(MAX_ITERATIONS):
             is_last = iteration == MAX_ITERATIONS - 1
             try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
+                response = client.chat.completions.create(
+                    model=model,
                     messages=messages,
                     tools=TOOLS if not is_last else None,
                     tool_choice="auto" if not is_last else None,
