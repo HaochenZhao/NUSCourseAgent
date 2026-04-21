@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import json
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -42,7 +42,7 @@ agent = CourseAgent()
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/send-otp")
-def send_otp(req: schemas.OTPRequest, db: Session = Depends(get_db)):
+def send_otp(req: schemas.OTPRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     code = auth.generate_otp()
     expiry = datetime.utcnow() + timedelta(minutes=auth.OTP_EXPIRE_MINUTES)
     
@@ -57,9 +57,8 @@ def send_otp(req: schemas.OTPRequest, db: Session = Depends(get_db)):
     
     db.commit()
     
-    # Send OTP (Email or Terminal fallback)
-    import asyncio
-    asyncio.create_task(send_otp_email(req.email, code))
+    # Send OTP (Email or Terminal fallback) using BackgroundTasks
+    background_tasks.add_task(send_otp_email, req.email, code)
     
     return {"message": "OTP sent"}
 
