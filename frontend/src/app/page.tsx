@@ -184,7 +184,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [currentToolCall, setCurrentToolCall] = useState<string | null>(null);
   const [toolCallHistory, setToolCallHistory] = useState<string[]>([]);
-  
+
   // Auth state
   const [token, setToken] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -244,7 +244,7 @@ export default function Home() {
       try {
         const resp = await fetch(`${API_BASE}/chat/stream`, {
           method: "POST",
-          headers: { 
+          headers: {
             "Content-Type": "application/json",
             ...(token ? { "Authorization": `Bearer ${token}` } : {})
           },
@@ -311,7 +311,8 @@ export default function Home() {
             });
             setCurrentToolCall("Writing response...");
           } else if (eventType === "timetable") {
-            timetableData = payload as TimetableData;
+            // timetableData = payload as TimetableData;
+            timetableData = (payload as unknown) as TimetableData;
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
@@ -397,14 +398,14 @@ export default function Home() {
                 </div>
               </div>
               <div className="flex gap-1 ml-2">
-                <button 
+                <button
                   onClick={() => setIsSettingsOpen(true)}
                   className="p-2 text-slate-400 hover:text-white hover:bg-white/5 rounded-lg transition-all"
                   title="Settings"
                 >
                   <Settings size={16} />
                 </button>
-                <button 
+                <button
                   onClick={handleLogout}
                   className="p-2 text-slate-400 hover:text-rose-400 hover:bg-rose-400/5 rounded-lg transition-all"
                   title="Logout"
@@ -444,11 +445,10 @@ export default function Home() {
               {(["undergraduate", "postgraduate"] as const).map((lvl) => (
                 <button
                   key={lvl}
-                  className={`flex-1 text-xs py-2 rounded-lg border transition-all duration-200 ${
-                    profile.level === lvl
+                  className={`flex-1 text-xs py-2 rounded-lg border transition-all duration-200 ${profile.level === lvl
                       ? "bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-500/20"
                       : "bg-white/5 text-slate-400 border-white/10 hover:bg-white/10"
-                  }`}
+                    }`}
                   onClick={() => setProfile({ ...profile, level: lvl })}
                 >
                   {lvl === "undergraduate" ? "Undergrad" : "Postgrad"}
@@ -489,11 +489,10 @@ export default function Home() {
               {[1, 2].map((s) => (
                 <button
                   key={s}
-                  className={`flex-1 text-sm py-2 rounded-lg border transition-all duration-200 ${
-                    profile.semester === s
+                  className={`flex-1 text-sm py-2 rounded-lg border transition-all duration-200 ${profile.semester === s
                       ? "bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-500/20"
                       : "bg-white/5 text-slate-400 border-white/10 hover:bg-white/10"
-                  }`}
+                    }`}
                   onClick={() => setProfile({ ...profile, semester: s })}
                 >
                   Sem {s}
@@ -544,11 +543,10 @@ export default function Home() {
 
                   {/* Message bubble */}
                   <div
-                    className={`rounded-xl px-4 py-3 ${
-                      msg.role === "user"
+                    className={`rounded-xl px-4 py-3 ${msg.role === "user"
                         ? "bg-indigo-600 text-white ml-auto max-w-xl rounded-tr-none"
                         : "glass rounded-tl-none"
-                    }`}
+                      }`}
                   >
                     {msg.role === "user" ? (
                       <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
@@ -650,17 +648,17 @@ export default function Home() {
       </main>
 
       {/* Modals */}
-      <LoginModal 
-        isOpen={isLoginOpen} 
-        onClose={() => setIsLoginOpen(false)} 
-        onLoginSuccess={handleLoginSuccess} 
+      <LoginModal
+        isOpen={isLoginOpen}
+        onClose={() => setIsLoginOpen(false)}
+        onLoginSuccess={handleLoginSuccess}
       />
-      
+
       {token && (
-        <SettingsModal 
-          isOpen={isSettingsOpen} 
-          onClose={() => setIsSettingsOpen(false)} 
-          token={token} 
+        <SettingsModal
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          token={token}
         />
       )}
     </div>
