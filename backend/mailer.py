@@ -7,6 +7,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+MAIL_FROM = os.getenv("MAIL_FROM", "NUS Course Agent <onboarding@resend.dev>")
 
 async def send_otp_email(email: str, otp: str):
     """
@@ -22,7 +23,7 @@ async def send_otp_email(email: str, otp: str):
             resend.api_key = RESEND_API_KEY
             
             params = {
-                "from": "NUS Course Agent <onboarding@resend.dev>",
+                "from": MAIL_FROM,
                 "to": [email],
                 "subject": "Your Verification Code - NUS Course Agent",
                 "html": f"""
